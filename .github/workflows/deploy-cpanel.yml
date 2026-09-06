@@ -1,0 +1,85 @@
+name: Deploy Elite Convention Hall to cPanel
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Build and Deploy to cPanel
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Build React Frontend
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        working-directory: frontend-react
+        run: npm install
+
+      - name: Build frontend
+        working-directory: frontend-react
+        env:
+          VITE_API_BASE_URL: https://elite-convention-hall.datapulseglobal.com/api
+        run: npm run build
+
+      # Prepare Laravel Backend
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, bcmath, pdo_mysql, openssl, tokenizer, xml, ctype, json, curl, fileinfo
+          tools: composer:v2
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
+
+      # Deploy React Frontend
+      - name: Deploy frontend to cPanel
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.CPANEL_FTP_SERVER }}
+          port: ${{ secrets.CPANEL_FTP_PORT }}
+          protocol: ftps
+          username: ${{ secrets.CPANEL_FTP_FRONTEND_USERNAME }}
+          password: ${{ secrets.CPANEL_FTP_FRONTEND_PASSWORD }}
+          local-dir: ./frontend-react/dist/
+          server-dir: ./
+          exclude: |
+            **/api/**
+            api/**
+            **/.ftp-deploy-sync-state.json
+
+      # Deploy Laravel Backend
+      - name: Deploy backend to cPanel
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.CPANEL_FTP_SERVER }}
+          port: ${{ secrets.CPANEL_FTP_PORT }}
+          protocol: ftps
+          username: ${{ secrets.CPANEL_FTP_BACKEND_USERNAME }}
+          password: ${{ secrets.CPANEL_FTP_BACKEND_PASSWORD }}
+          local-dir: ./backend/
+          server-dir: ./
+          exclude: |
+            **/.git*
+            **/.github/**
+            **/.env
+            **/node_modules/**
+            storage/logs/**
+            storage/framework/cache/**
+            storage/framework/sessions/**
+            storage/framework/views/**
+            **/api/**
+            api/**
+            **/uploads/**
+            uploads/**
+            **/.ftp-deploy-sync-state.json
