@@ -14,10 +14,15 @@ return Application::configure(basePath: dirname(__DIR__))
     apiPrefix: '',
 )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        $middleware->alias([
+            'employee.auth' => \App\Http\Middleware\AuthenticateEmployee::class,
+            'office.admin' => \App\Http\Middleware\AuthenticateOfficeAdmin::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
+        // apiPrefix is '', so `is('api/*')` never matched and validation
+        // errors were returned as 302 redirects that the SPA couldn't read.
         $exceptions->shouldRenderJsonWhen(
-            fn (Request $request) => $request->is('api/*'),
+            fn (Request $request) => $request->expectsJson() || $request->is('api/*'),
         );
     })->create();

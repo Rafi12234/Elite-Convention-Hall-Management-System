@@ -1,0 +1,2001 @@
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import BackButton from "../components/BackButton";
+import DateTimePicker from "../components/DateTimePicker";
+import {
+  BadgeCheck,
+  CalendarClock,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  ClipboardList,
+  ImagePlus,
+  Loader2,
+  Pencil,
+  Save,
+  Sparkles,
+  Trash2,
+  UserRound,
+  UserCog,
+  Wallet,
+  X,
+  Plus,
+  Calendar,
+  ZoomIn,
+  AlertTriangle,
+} from "lucide-react";
+import { loadCurrentEmployee } from "../services/authStorage";
+import { loadEmployeeDirectory } from "../services/managementStorage";
+import eliteLogo from "../assets/elite-logo.png";
+import { CLIENT_REQUIREMENT_OPTIONS } from "../data/defaultSheet";
+import {
+  createMeeting,
+  createMeetingItem,
+  deleteMeeting,
+  deleteMeetingItem,
+  deleteMeetingItemImage,
+  finalizeClient,
+  loadClientMeetings,
+  loadFinalizationDetail,
+  loadFinalizePreview,
+  resolveImageUrl,
+  updateMeeting,
+  updateMeetingItem,
+  uploadMeetingItemImages,
+} from "../services/meetingsStorage";
+
+function toDatetimeLocalValue(value) {
+  if (!value) return "";
+  const normalized = String(value).replace(" ", "T");
+  return normalized.slice(0, 16);
+}
+
+// "YYYY-MM-DDTHH:MM" for right now — used as the <input min> (blocks past
+// dates and past times on today) and to prefill a new meeting's picker so
+// the employee only has to click OK, not hunt for today's date/time.
+function nowMinValue() {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mi = String(now.getMinutes()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+}
+
+function isPastDatetimeValue(value) {
+  if (!value) return false;
+  return value.slice(0, 16) < nowMinValue();
+}
+
+// "YYYY-MM-DDT00:00" for today — the next meeting's date can't be earlier
+// than today, but any time of day on/after that date is allowed. Mirrors
+// ClientCallsPage.jsx.
+function todayMinValue() {
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, "0");
+  const dd = String(today.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}T00:00`;
+}
+
+// Only compares the date part — the next meeting's time of day is unrestricted.
+function isNextMeetingDateTooEarly(value) {
+  if (!value) return false;
+  return value.slice(0, 10) < todayMinValue().slice(0, 10);
+}
+
+// The next meeting's assignee dropdown defaults to whoever is already
+// assigned, falling back to the logged-in employee — mirrors the same
+// default both on initial render and when checking dirty state, so opening
+// a card with no prior assignment doesn't itself count as an unsaved change.
+function defaultNextMeetingAssigneeId(meeting, employeeId) {
+  return meeting.nextMeetingAssignedEmployeeId
+    ? String(meeting.nextMeetingAssignedEmployeeId)
+    : String(employeeId || "");
+}
+
+function formatDisplayDatetime(value) {
+  if (!value) return "Not scheduled yet";
+  const date = new Date(String(value).replace(" ", "T"));
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+// "Event Date" arrives as a plain "YYYY-MM-DD" — shown as "DD/MM/YYYY" to
+// match how it's displayed on the Management sheet.
+function formatEventDateDisplay(iso) {
+  const match = String(iso ?? "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return "";
+  const [, yyyy, mm, dd] = match;
+  return `${dd}/${mm}/${yyyy}`;
+}
+
+function ImageLightbox({ images, initialIndex, onClose }) {
+  const [index, setIndex] = useState(initialIndex);
+
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (event.key === "Escape") onClose();
+      if (event.key === "ArrowRight")
+        setIndex((i) => (i + 1) % images.length);
+      if (event.key === "ArrowLeft")
+        setIndex((i) => (i - 1 + images.length) % images.length);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [images.length, onClose]);
+
+  const image = images[index];
+  if (!image) return null;
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-70 flex items-center justify-center bg-black/95 p-4 backdrop-blur-sm"
+      onClick={onClose}
+      style={{ animation: "fadeIn 0.2s ease" }}
+    >
+      <style>{`
+        @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(20px) } to { opacity: 1; transform: translateY(0) } }
+        @keyframes scaleIn { from { opacity: 0; transform: scale(0.95) } to { opacity: 1; transform: scale(1) } }
+        @keyframes slideInRight { from { opacity: 0; transform: translateX(30px) } to { opacity: 1; transform: translateX(0) } }
+      `}</style>
+
+      <button
+        onClick={onClose}
+        className="absolute right-5 top-5 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition-all duration-200 hover:bg-white/20 hover:scale-110"
+      >
+        <X size={20} />
+      </button>
+
+      {images.length > 1 && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            setIndex((i) => (i - 1 + images.length) % images.length);
+          }}
+          className="absolute left-5 top-1/2 -translate-y-1/2 flex h-12 w-12 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition-all duration-200 hover:bg-white/25 hover:scale-110"
+        >
+          <ChevronLeft size={24} />
+        </button>
+      )}
+
+      <img
+        src={resolveImageUrl(image.url)}
+        alt={image.originalFileName || "Meeting image"}
+        className="max-h-[88vh] max-w-[88vw] rounded-2xl object-contain shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+        style={{ animation: "scaleIn 0.25s ease" }}
+      />
+
+      {images.length > 1 && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            setIndex((i) => (i + 1) % images.length);
+          }}
+          className="absolute right-5 top-1/2 -translate-y-1/2 flex h-12 w-12 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition-all duration-200 hover:bg-white/25 hover:scale-110"
+        >
+          <ChevronRight size={24} />
+        </button>
+      )}
+
+      {images.length > 1 && (
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-2 rounded-full bg-white/10 px-5 py-2.5 backdrop-blur-sm">
+          {images.map((_, i) => (
+            <button
+              key={i}
+              onClick={(e) => {
+                e.stopPropagation();
+                setIndex(i);
+              }}
+              className={`rounded-full transition-all duration-200 ${
+                i === index
+                  ? "h-2 w-6 bg-white"
+                  : "h-2 w-2 bg-white/40 hover:bg-white/70"
+              }`}
+            />
+          ))}
+        </div>
+      )}
+    </div>,
+    document.body
+  );
+}
+
+function MeetingCard({ meeting, rowKey, employeeId, employeeDirectory, onChanged, onDeleted }) {
+  // A meeting only "counts" once it has at least one item on record —
+  // until then the card stays fully unlocked so the employee can freely
+  // fill it in and hit Save for the first time.
+  const hasContent = meeting.items.length > 0;
+  const [isEditing, setIsEditing] = useState(!hasContent);
+  const [nextMeetingDatetime, setNextMeetingDatetime] = useState(
+    toDatetimeLocalValue(meeting.nextMeetingDatetime)
+  );
+  const [nextMeetingAssignedEmployeeId, setNextMeetingAssignedEmployeeId] = useState(
+    defaultNextMeetingAssigneeId(meeting, employeeId)
+  );
+  const [isSaving, setIsSaving] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [isAddingItem, setIsAddingItem] = useState(false);
+  const [isCreatingItem, setIsCreatingItem] = useState(false);
+  const [draftItemKey, setDraftItemKey] = useState("");
+  const [draftCustomLabel, setDraftCustomLabel] = useState("");
+  const [error, setError] = useState("");
+  const [dirtyItemIds, setDirtyItemIds] = useState(() => new Set());
+  const itemRowRefs = useRef({});
+  // Items created this editing session that have not been confirmed by a
+  // Save click yet - discarded on Cancel or if the employee leaves without saving.
+  const [pendingNewItemIds, setPendingNewItemIds] = useState(() => new Set());
+  const pendingNewItemIdsRef = useRef(pendingNewItemIds);
+  const wasEmptyAtMountRef = useRef(!hasContent);
+  const meetingItemIdsRef = useRef(meeting.items.map((item) => item.id));
+
+  useEffect(() => {
+    pendingNewItemIdsRef.current = pendingNewItemIds;
+  }, [pendingNewItemIds]);
+
+  useEffect(() => {
+    meetingItemIdsRef.current = meeting.items.map((item) => item.id);
+  }, [meeting.items]);
+
+  useEffect(() => {
+    return () => {
+      const ids = Array.from(pendingNewItemIdsRef.current);
+      if (ids.length === 0) return;
+      Promise.allSettled(ids.map((id) => deleteMeetingItem(rowKey, meeting.id, id)))
+        .then(() => {
+          const remainingWillBeEmpty = meetingItemIdsRef.current.every((id) => ids.includes(id));
+          if (wasEmptyAtMountRef.current && remainingWillBeEmpty) {
+            return deleteMeeting(rowKey, meeting.id).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    };
+  }, [rowKey, meeting.id]);
+
+  const handleItemDirtyChange = useCallback((itemId, isItemDirty) => {
+    setDirtyItemIds((prev) => {
+      const next = new Set(prev);
+      if (isItemDirty) next.add(itemId);
+      else next.delete(itemId);
+      return next;
+    });
+  }, []);
+
+  const handleItemRemoved = useCallback((itemId) => {
+    setPendingNewItemIds((prev) => {
+      if (!prev.has(itemId)) return prev;
+      const next = new Set(prev);
+      next.delete(itemId);
+      return next;
+    });
+  }, []);
+
+  const hasDirtyItems = dirtyItemIds.size > 0;
+
+  async function saveDirtyItems() {
+    const idsToSave = Array.from(dirtyItemIds);
+    const results = await Promise.allSettled(
+      idsToSave.map((id) => itemRowRefs.current[id]?.save())
+    );
+    return results.some((r) => r.status === "rejected");
+  }
+
+  const isNextMeetingAssigneeDirty = nextMeetingAssignedEmployeeId !== defaultNextMeetingAssigneeId(meeting, employeeId);
+
+  // Based on the persisted schedule (not the unsaved edit) — flags a next
+  // meeting whose scheduled moment has already come and gone.
+  const isNextMeetingOverdue = Boolean(meeting.nextMeetingDatetime) &&
+    isPastDatetimeValue(toDatetimeLocalValue(meeting.nextMeetingDatetime));
+
+  const availableItemOptions = CLIENT_REQUIREMENT_OPTIONS.filter(
+    (option) =>
+      option.key === "other" || !meeting.items.some((item) => item.itemKey === option.key)
+  );
+
+  const hasPendingNewItems = pendingNewItemIds.size > 0;
+
+  // Nothing auto-saves anymore — next-meeting time, next-meeting assignee
+  // and item edits only take effect once the unified Save button is clicked.
+  const isDirty =
+    nextMeetingDatetime !== toDatetimeLocalValue(meeting.nextMeetingDatetime) ||
+    isNextMeetingAssigneeDirty ||
+    hasDirtyItems ||
+    hasPendingNewItems;
+
+  // Locked (read-only) once the meeting has real content and isn't
+  // currently being edited — the employee must click "Edit" to change it.
+  const fieldsLocked = hasContent && !isEditing;
+
+  function handleNextMeetingDatetimeChange(newValue) {
+    setNextMeetingDatetime(newValue);
+    setError("");
+    if (newValue && isNextMeetingDateTooEarly(newValue)) {
+      setError("Next meeting date cannot be before today. Any time of day is fine.");
+    }
+  }
+
+  async function handleSave() {
+    setError("");
+    if (meeting.items.length === 0) {
+      setError("Add at least one item before saving.");
+      return;
+    }
+    if (nextMeetingDatetime && isNextMeetingDateTooEarly(nextMeetingDatetime)) {
+      setError("Next meeting date cannot be before today. Any time of day is fine.");
+      return;
+    }
+    setIsSaving(true);
+    try {
+      await updateMeeting(rowKey, meeting.id, {
+        nextMeetingDatetime: nextMeetingDatetime || null,
+        nextMeetingAssignedEmployeeId: nextMeetingDatetime ? (nextMeetingAssignedEmployeeId || null) : null,
+        employeeId,
+      });
+      const itemsFailed = await saveDirtyItems();
+      if (itemsFailed) {
+        setError("Some items failed to save. Please check the highlighted rows.");
+      } else {
+        setPendingNewItemIds(new Set());
+        setIsEditing(false);
+      }
+      onChanged();
+    } catch (err) {
+      setError(err.message || "Failed to save meeting.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  function handleEdit() {
+    setError("");
+    setIsEditing(true);
+  }
+
+  // Removes any items added this session that were never confirmed by
+  // Save — returns true if anything was actually discarded.
+  async function discardPendingNewItems() {
+    const ids = Array.from(pendingNewItemIds);
+    if (ids.length === 0) return false;
+    setPendingNewItemIds(new Set());
+    await Promise.allSettled(ids.map((id) => deleteMeetingItem(rowKey, meeting.id, id)));
+    const remainingWillBeEmpty = meeting.items.every((item) => ids.includes(item.id));
+    if (wasEmptyAtMountRef.current && remainingWillBeEmpty) {
+      await deleteMeeting(rowKey, meeting.id).catch(() => {});
+    }
+    return true;
+  }
+
+  async function handleCancel() {
+    setError("");
+    setNextMeetingDatetime(toDatetimeLocalValue(meeting.nextMeetingDatetime));
+    setNextMeetingAssignedEmployeeId(defaultNextMeetingAssigneeId(meeting, employeeId));
+    Object.values(itemRowRefs.current).forEach((row) => row?.cancel());
+    setIsEditing(false);
+    const discarded = await discardPendingNewItems();
+    if (discarded) onChanged();
+  }
+
+  async function handleDelete() {
+    if (
+      !window.confirm(
+        "Delete this meeting and all its images? This cannot be undone."
+      )
+    )
+      return;
+    setIsDeleting(true);
+    setError("");
+    try {
+      await deleteMeeting(rowKey, meeting.id);
+      onDeleted();
+    } catch (err) {
+      setError(err.message || "Failed to delete meeting.");
+      setIsDeleting(false);
+    }
+  }
+
+  async function handleAddItem(itemKey, customLabel = "") {
+    if (!itemKey) return;
+    setIsCreatingItem(true);
+    setError("");
+    try {
+      const created = await createMeetingItem(rowKey, meeting.id, {
+        itemKey,
+        customLabel,
+        description: "",
+        quantity: 1,
+        employeeId,
+      });
+      if (created?.id) {
+        setPendingNewItemIds((prev) => {
+          const next = new Set(prev);
+          next.add(created.id);
+          return next;
+        });
+      }
+      setIsAddingItem(false);
+      setDraftItemKey("");
+      setDraftCustomLabel("");
+      onChanged();
+    } catch (err) {
+      setError(err.message || "Failed to add item.");
+    } finally {
+      setIsCreatingItem(false);
+    }
+  }
+
+  function handleStartAddItem() {
+    setDraftItemKey("");
+    setDraftCustomLabel("");
+    setIsAddingItem(true);
+  }
+
+  function handleCancelAddItem() {
+    setIsAddingItem(false);
+    setDraftItemKey("");
+    setDraftCustomLabel("");
+  }
+
+  function handleDraftItemKeyChange(value) {
+    setDraftItemKey(value);
+    setDraftCustomLabel("");
+    if (value && value !== "other") {
+      handleAddItem(value);
+    }
+  }
+
+  function handleConfirmOtherItem() {
+    const trimmed = draftCustomLabel.trim();
+    if (!trimmed) return;
+    handleAddItem("other", trimmed);
+  }
+
+  return (
+    <div
+      className="group overflow-hidden rounded-3xl border border-slate-200/80 bg-white shadow-sm transition-all duration-300 hover:shadow-xl hover:shadow-slate-200/60 hover:-translate-y-0.5"
+      style={{ animation: "slideUp 0.35s ease both" }}
+    >
+      <div
+        className="relative flex flex-wrap items-center justify-between gap-3 px-6 py-4 transition-colors duration-200 bg-linear-to-r from-slate-50 to-white"
+      >
+        <div className="flex items-center gap-3">
+          <div
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white"
+          >
+            <Calendar size={17} />
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+              Scheduled
+            </p>
+            <p className="text-sm font-black text-slate-900">
+              {formatDisplayDatetime(meeting.meetingDatetime)}
+            </p>
+          </div>
+          {isNextMeetingOverdue && (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-red-200 bg-red-50 px-3 py-1.5 text-[10px] font-black uppercase tracking-wide text-red-600">
+              <AlertTriangle size={12} />
+              Missed Follow-up
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {hasContent && !isEditing && (
+            <button
+              onClick={handleEdit}
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-black text-slate-700 shadow-sm transition-all duration-200 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900"
+            >
+              <Pencil size={13} />
+              Edit
+            </button>
+          )}
+          {isEditing && (
+            <>
+              <button
+                onClick={handleSave}
+                disabled={isSaving || !isDirty}
+                className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-xs font-black text-white shadow-md shadow-slate-900/20 transition-all duration-200 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                style={{ animation: "slideUp 0.2s ease" }}
+              >
+                {isSaving ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <Save size={13} />
+                )}
+                Save
+              </button>
+              {hasContent && (
+                <button
+                  onClick={handleCancel}
+                  disabled={isSaving}
+                  className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-black text-slate-700 shadow-sm transition-all duration-200 hover:border-slate-300 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  <X size={13} />
+                  Cancel
+                </button>
+              )}
+            </>
+          )}
+          <button
+            onClick={handleDelete}
+            disabled={isDeleting}
+            className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 transition-all duration-200 hover:bg-red-50 hover:text-red-500 disabled:opacity-50"
+          >
+            {isDeleting ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Trash2 size={16} />
+            )}
+          </button>
+        </div>
+      </div>
+
+      <div className="grid gap-0 lg:grid-cols-[280px_1fr]">
+        <div className="border-b border-slate-100 p-6 lg:border-b-0 lg:border-r">
+          <label className="mb-3 block text-[10px] font-black uppercase tracking-widest text-slate-400">
+            Meeting Time
+          </label>
+          <div
+            className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700"
+            title="Set automatically when the meeting was created — not editable"
+          >
+            <CalendarClock size={14} className="shrink-0 text-slate-400" />
+            {formatDisplayDatetime(meeting.meetingDatetime)}
+          </div>
+
+          <div className="mt-5 border-t border-slate-100 pt-5">
+            <label className="mb-3 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-600">
+              <CalendarClock size={12} />
+              Next Meeting Date &amp; Time
+            </label>
+            <div className="flex items-stretch gap-2">
+              <DateTimePicker
+                value={nextMeetingDatetime}
+                onChange={handleNextMeetingDatetimeChange}
+                min={todayMinValue()}
+                minDateOnly
+                subtle
+                disabled={fieldsLocked}
+                placeholder="Select next meeting date & time"
+                className="w-full"
+              />
+            </div>
+
+            <label className="mb-2 mt-4 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-600">
+              <UserCog size={12} />
+              Assign Employee for Next Meeting
+            </label>
+            <select
+              value={nextMeetingAssignedEmployeeId}
+              onChange={(e) => setNextMeetingAssignedEmployeeId(e.target.value)}
+              disabled={fieldsLocked}
+              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 outline-none transition-all duration-200 focus:border-slate-400 focus:bg-white focus:ring-4 focus:ring-slate-100 disabled:cursor-not-allowed disabled:opacity-70"
+            >
+              <option value="">Unassigned</option>
+              {employeeDirectory.map((emp) => (
+                <option key={emp.id} value={String(emp.id)}>
+                  {emp.fullName}
+                </option>
+              ))}
+            </select>
+
+            {isNextMeetingOverdue && (
+              <p className="mt-2 flex items-center gap-1.5 text-[11px] font-bold text-red-500">
+                <AlertTriangle size={12} />
+                This scheduled meeting date has passed — the follow-up may have been missed.
+              </p>
+            )}
+          </div>
+
+          {(meeting.createdByName || meeting.updatedByName || meeting.assignedByEmployeeName) && (
+            <div className="mt-5 space-y-2 rounded-2xl bg-slate-50 p-3.5">
+              {meeting.assignedByEmployeeName && (
+                <p className="flex items-center gap-2 text-[11px] font-semibold text-slate-500">
+                  <UserCog size={12} className="text-slate-400" />
+                  Assigned by{" "}
+                  <span className="font-black text-slate-700">
+                    {meeting.assignedByEmployeeName}
+                  </span>
+                </p>
+              )}
+              {meeting.createdByName && (
+                <p className="flex items-center gap-2 text-[11px] font-semibold text-slate-500">
+                  <UserRound size={12} className="text-slate-400" />
+                  Created by{" "}
+                  <span className="font-black text-slate-700">
+                    {meeting.createdByName}
+                  </span>
+                </p>
+              )}
+              {meeting.updatedByName &&
+                meeting.updatedByName !== meeting.createdByName && (
+                  <p className="flex items-center gap-2 text-[11px] font-semibold text-slate-500">
+                    <UserRound size={12} className="text-slate-400" />
+                    Updated by{" "}
+                    <span className="font-black text-slate-700">
+                      {meeting.updatedByName}
+                    </span>
+                  </p>
+                )}
+            </div>
+          )}
+        </div>
+
+        <div className="p-6">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <ClipboardList size={15} className="text-slate-400" />
+              <span className="text-xs font-black uppercase tracking-widest text-slate-500">
+                Items
+              </span>
+              <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-slate-900 px-1.5 text-[10px] font-black text-white">
+                {meeting.items.length}
+              </span>
+            </div>
+
+            <div className="relative flex items-center gap-2">
+              {!fieldsLocked && (
+                <button
+                  onClick={isAddingItem ? handleCancelAddItem : handleStartAddItem}
+                  disabled={isCreatingItem || (!isAddingItem && availableItemOptions.length === 0)}
+                  className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-xs font-black text-white transition-all duration-200 hover:bg-slate-700 disabled:opacity-50"
+                >
+                  {isCreatingItem ? (
+                    <Loader2 size={13} className="animate-spin" />
+                  ) : isAddingItem ? (
+                    <X size={13} />
+                  ) : (
+                    <Plus size={13} />
+                  )}
+                  {isAddingItem ? "Cancel" : "Add Item"}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {meeting.items.length === 0 && !isAddingItem ? (
+            <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 py-10 text-center">
+              <ClipboardList size={28} className="mb-3 text-slate-300" />
+              <p className="text-sm font-black text-slate-400">No items yet</p>
+              <p className="mt-1 text-xs font-medium text-slate-300">
+                {fieldsLocked ? "Click \"Edit\" to add items." : "Click \"Add Item\" to get started"}
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-hidden rounded-2xl border border-slate-200">
+              <div className="overflow-x-auto">
+                <table className="min-w-full border-collapse text-xs">
+                  <thead>
+                    <tr className="bg-slate-50">
+                      <th className="min-w-40 border-b border-r border-slate-200 px-4 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">
+                        Item
+                      </th>
+                      <th className="min-w-60 border-b border-r border-slate-200 px-4 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">
+                        Description
+                      </th>
+                      <th className="min-w-25 border-b border-r border-slate-200 px-4 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">
+                        Qty
+                      </th>
+                      <th className="min-w-60 border-b border-slate-200 px-4 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-400">
+                        Images
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {isAddingItem && (
+                      <tr className="border-b border-slate-100 bg-slate-50/60 align-top">
+                        <td className="border-r border-slate-100 px-3 py-2.5">
+                          <select
+                            autoFocus
+                            value={draftItemKey}
+                            onChange={(e) => handleDraftItemKeyChange(e.target.value)}
+                            disabled={isCreatingItem}
+                            className="w-full rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs font-bold text-slate-800 outline-none transition-all duration-200 hover:border-slate-300 hover:bg-slate-50 focus:border-slate-400 focus:ring-4 focus:ring-slate-100 disabled:opacity-60"
+                          >
+                            <option value="">Choose an item...</option>
+                            {availableItemOptions.map((option) => (
+                              <option key={option.key} value={option.key}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+
+                          {draftItemKey === "other" && (
+                            <div className="mt-2 flex items-center gap-1.5">
+                              <input
+                                autoFocus
+                                type="text"
+                                value={draftCustomLabel}
+                                onChange={(e) => setDraftCustomLabel(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") handleConfirmOtherItem();
+                                }}
+                                placeholder="Enter item name"
+                                disabled={isCreatingItem}
+                                className="w-full rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs font-semibold text-slate-800 outline-none transition-all duration-200 placeholder:text-slate-300 hover:border-slate-300 hover:bg-slate-50 focus:border-slate-400 focus:ring-4 focus:ring-slate-100 disabled:opacity-60"
+                              />
+                              <button
+                                onClick={handleConfirmOtherItem}
+                                disabled={isCreatingItem || !draftCustomLabel.trim()}
+                                title="Add this item"
+                                className="shrink-0 flex h-8 w-8 items-center justify-center rounded-xl bg-slate-900 text-white transition-all duration-200 hover:bg-slate-700 disabled:opacity-40"
+                              >
+                                {isCreatingItem ? (
+                                  <Loader2 size={13} className="animate-spin" />
+                                ) : (
+                                  <CheckCircle2 size={13} />
+                                )}
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                        <td
+                          colSpan={3}
+                          className="px-4 py-2.5 text-[11px] font-medium italic text-slate-300"
+                        >
+                          {draftItemKey === "other"
+                            ? "Enter a name above, then confirm to add this item."
+                            : "Select an item type to continue…"}
+                        </td>
+                      </tr>
+                    )}
+                    {meeting.items.map((item) => (
+                      <MeetingItemRow
+                        key={item.id}
+                        ref={(el) => {
+                          if (el) itemRowRefs.current[item.id] = el;
+                          else delete itemRowRefs.current[item.id];
+                        }}
+                        rowKey={rowKey}
+                        meetingId={meeting.id}
+                        item={item}
+                        employeeId={employeeId}
+                        locked={fieldsLocked}
+                        onChanged={onChanged}
+                        onDirtyChange={handleItemDirtyChange}
+                        onItemRemoved={handleItemRemoved}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {error && (
+            <div className="mt-3 flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2.5">
+              <p className="text-xs font-bold text-red-600">{error}</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const MeetingItemRow = forwardRef(function MeetingItemRow(
+  { rowKey, meetingId, item, employeeId, locked, onChanged, onDirtyChange, onItemRemoved },
+  ref
+) {
+  const [description, setDescription] = useState(item.description || "");
+  const [quantity, setQuantity] = useState(item.quantity ?? 1);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [viewerIndex, setViewerIndex] = useState(null);
+  const [error, setError] = useState("");
+  const fileInputRef = useRef(null);
+  const [orderedImageIds, setOrderedImageIds] = useState(() =>
+    item.images.map((image) => image.id)
+  );
+  const [prevImageIds, setPrevImageIds] = useState(() =>
+    item.images.map((image) => image.id)
+  );
+  const [dragIndex, setDragIndex] = useState(null);
+
+  const currentImageIds = item.images.map((image) => image.id);
+  if (
+    currentImageIds.length !== prevImageIds.length ||
+    currentImageIds.some((id, i) => id !== prevImageIds[i])
+  ) {
+    const stillPresent = orderedImageIds.filter((id) =>
+      currentImageIds.includes(id)
+    );
+    const newlyAdded = currentImageIds.filter(
+      (id) => !orderedImageIds.includes(id)
+    );
+    setOrderedImageIds([...stillPresent, ...newlyAdded]);
+    setPrevImageIds(currentImageIds);
+  }
+
+  const orderedImages = orderedImageIds
+    .map((id) => item.images.find((image) => image.id === id))
+    .filter(Boolean);
+
+  const option = CLIENT_REQUIREMENT_OPTIONS.find(
+    (c) => c.key === item.itemKey
+  );
+  const displayLabel =
+    item.itemKey === "other" ? item.customLabel || "Other" : option?.label || item.itemKey;
+  const isDirty =
+    description !== (item.description || "") ||
+    Number(quantity) !== (item.quantity ?? 1);
+
+  async function handleSave() {
+    setIsSaving(true);
+    setError("");
+    try {
+      await updateMeetingItem(rowKey, meetingId, item.id, {
+        description,
+        quantity,
+        employeeId,
+      });
+    } catch (err) {
+      setError(err.message || "Failed to save item.");
+      throw err;
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  function handleCancel() {
+    setDescription(item.description || "");
+    setQuantity(item.quantity ?? 1);
+    setError("");
+  }
+
+  useImperativeHandle(ref, () => ({
+    save: handleSave,
+    cancel: handleCancel,
+    isDirty,
+  }));
+
+  useEffect(() => {
+    onDirtyChange?.(item.id, isDirty);
+    return () => {
+      onDirtyChange?.(item.id, false);
+    };
+  }, [isDirty, item.id, onDirtyChange]);
+
+  function handleImageDragStart(index) {
+    setDragIndex(index);
+  }
+  function handleImageDragOver(event) {
+    event.preventDefault();
+  }
+  function handleImageDrop(dropIndex) {
+    if (dragIndex === null || dragIndex === dropIndex) {
+      setDragIndex(null);
+      return;
+    }
+    setOrderedImageIds((prev) => {
+      const next = [...prev];
+      const [movedId] = next.splice(dragIndex, 1);
+      next.splice(dropIndex, 0, movedId);
+      return next;
+    });
+    setDragIndex(null);
+  }
+
+  async function handleDeleteItem() {
+    if (
+      !window.confirm(
+        `Remove "${displayLabel}" and its images? This cannot be undone.`
+      )
+    )
+      return;
+    setIsDeleting(true);
+    setError("");
+    try {
+      await deleteMeetingItem(rowKey, meetingId, item.id);
+      onItemRemoved?.(item.id);
+      onChanged();
+    } catch (err) {
+      setError(err.message || "Failed to remove item.");
+      setIsDeleting(false);
+    }
+  }
+
+  async function handleFilesSelected(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!files.length) return;
+    setIsUploading(true);
+    setError("");
+    try {
+      await uploadMeetingItemImages(
+        rowKey,
+        meetingId,
+        item.id,
+        files,
+        employeeId
+      );
+      onChanged();
+    } catch (err) {
+      setError(err.message || "Failed to upload images.");
+    } finally {
+      setIsUploading(false);
+    }
+  }
+
+  async function handleDeleteImage(imageId) {
+    try {
+      await deleteMeetingItemImage(rowKey, meetingId, item.id, imageId);
+      onChanged();
+    } catch (err) {
+      setError(err.message || "Failed to delete image.");
+    }
+  }
+
+  return (
+    <tr className="border-b border-slate-100 align-top transition-colors duration-150 hover:bg-slate-50/50 last:border-b-0">
+      <td className="border-r border-slate-100 px-4 py-3">
+        <div className="flex items-start justify-between gap-2">
+          <span className="font-black text-slate-900 leading-tight">
+            {displayLabel}
+          </span>
+          <button
+            onClick={handleDeleteItem}
+            disabled={isDeleting || locked}
+            title="Delete this item"
+            className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-500 transition-all duration-150 hover:bg-red-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isDeleting ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Trash2 size={12} />
+            )}
+          </button>
+        </div>
+      </td>
+
+      <td className="border-r border-slate-100 px-3 py-2">
+        <textarea
+          rows={3}
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          readOnly={locked}
+          placeholder="Describe this item..."
+          className={`w-full resize-none rounded-xl border border-slate-200 px-2 py-1.5 text-xs leading-5 text-slate-700 outline-none transition-all duration-200 placeholder:text-slate-300 ${
+            locked
+              ? "cursor-default bg-slate-50"
+              : "bg-white hover:border-slate-300 hover:bg-slate-50 focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-100"
+          }`}
+        />
+      </td>
+
+      <td className="border-r border-slate-100 px-3 py-2">
+        <input
+          type="number"
+          min="0"
+          value={quantity}
+          onChange={(e) => setQuantity(e.target.value)}
+          disabled={locked}
+          className="w-full rounded-xl border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 outline-none transition-all duration-200 hover:border-slate-300 hover:bg-slate-50 focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-100 disabled:cursor-not-allowed disabled:opacity-70"
+        />
+        {isSaving && (
+          <Loader2 size={11} className="mt-1 animate-spin text-slate-300" />
+        )}
+        {error && <p className="mt-1 text-[10px] font-bold text-red-500">{error}</p>}
+      </td>
+
+      <td className="px-3 py-2.5">
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={isUploading || locked}
+          className="mb-3 inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-black text-slate-600 shadow-sm transition-all duration-200 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {isUploading ? (
+            <Loader2 size={11} className="animate-spin" />
+          ) : (
+            <ImagePlus size={11} />
+          )}
+          Upload
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/gif,image/webp"
+          multiple
+          onChange={handleFilesSelected}
+          className="hidden"
+        />
+
+        {orderedImages.length === 0 ? (
+          <p className="text-[11px] font-medium text-slate-300">
+            No images yet.
+          </p>
+        ) : (
+          <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-4">
+            {orderedImages.map((image, imageIndex) => (
+              <div
+                key={image.id}
+                draggable={!locked}
+                onDragStart={() => handleImageDragStart(imageIndex)}
+                onDragOver={handleImageDragOver}
+                onDrop={() => handleImageDrop(imageIndex)}
+                onDragEnd={() => setDragIndex(null)}
+                title="Drag to reorder priority — left-most is 1st priority"
+                className={`group relative aspect-square w-full max-w-18 cursor-grab overflow-hidden rounded-xl border bg-slate-100 transition-all duration-200 hover:border-slate-300 hover:shadow-md hover:scale-105 active:cursor-grabbing ${
+                  dragIndex === imageIndex
+                    ? "opacity-40 border-slate-400"
+                    : "border-slate-200"
+                }`}
+                onClick={() => setViewerIndex(imageIndex)}
+              >
+                <span className="absolute left-1 top-1 z-10 flex h-4 w-4 items-center justify-center rounded-md bg-black/60 text-[9px] font-black text-white">
+                  {imageIndex + 1}
+                </span>
+                <img
+                  src={resolveImageUrl(image.url)}
+                  alt={image.originalFileName || "Item image"}
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                />
+                <div className="absolute inset-0 flex items-center justify-center bg-black/0 transition-all duration-200 group-hover:bg-black/30">
+                  <ZoomIn
+                    size={14}
+                    className="text-white opacity-0 transition-all duration-200 group-hover:opacity-100"
+                  />
+                </div>
+                {!locked && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteImage(image.id);
+                    }}
+                    className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-lg bg-black/70 text-white opacity-0 transition-all duration-200 group-hover:opacity-100 hover:bg-red-500"
+                  >
+                    <X size={10} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {viewerIndex !== null && (
+          <ImageLightbox
+            images={orderedImages}
+            initialIndex={viewerIndex}
+            onClose={() => setViewerIndex(null)}
+          />
+        )}
+      </td>
+    </tr>
+  );
+});
+
+// One card per item, aggregated across every meeting the item ever
+// appeared in (see GET /meetings/:rowKey/finalize/preview) — description
+// and quantity are still saved back onto the item's most recent
+// occurrence (group.sourceMeetingId/sourceItemId) via the existing
+// updateMeetingItem endpoint, exactly like the old single-meeting editor.
+function FinalizeItemGroupCard({
+  rowKey,
+  group,
+  employeeId,
+  selectedIds,
+  onToggleImage,
+  onViewImage,
+  onItemSaved,
+  onImagesAdded,
+}) {
+  const [description, setDescription] = useState(group.description || "");
+  const [quantity, setQuantity] = useState(group.quantity ?? 1);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [error, setError] = useState("");
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    setDescription(group.description || "");
+    setQuantity(group.quantity ?? 1);
+  }, [group.sourceItemId, group.description, group.quantity]);
+
+  const option = CLIENT_REQUIREMENT_OPTIONS.find((c) => c.key === group.itemKey);
+  const displayLabel =
+    group.itemKey === "other" ? group.customLabel || "Other" : option?.label || group.itemKey;
+
+  const isDirty =
+    description !== (group.description || "") ||
+    Number(quantity) !== (group.quantity ?? 1);
+
+  async function handleSave() {
+    if (!isDirty) return;
+    setIsSaving(true);
+    setError("");
+    try {
+      await updateMeetingItem(rowKey, group.sourceMeetingId, group.sourceItemId, {
+        description,
+        quantity,
+        employeeId,
+      });
+      await onItemSaved();
+    } catch (err) {
+      setError(err.message || "Failed to save item.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleFilesSelected(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!files.length) return;
+    setIsUploading(true);
+    setError("");
+    try {
+      const result = await uploadMeetingItemImages(
+        rowKey,
+        group.sourceMeetingId,
+        group.sourceItemId,
+        files,
+        employeeId
+      );
+      const uploaded = Array.isArray(result?.images) ? result.images : Array.isArray(result) ? result : [];
+      const newIds = uploaded.map((image) => image.id).filter(Boolean);
+      await onImagesAdded(group.groupKey, newIds);
+    } catch (err) {
+      setError(err.message || "Failed to upload images.");
+    } finally {
+      setIsUploading(false);
+    }
+  }
+
+  return (
+    <div className="rounded-2xl border border-slate-200 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <p className="text-sm font-black text-slate-900">{displayLabel}</p>
+        {isSaving && <Loader2 size={13} className="animate-spin text-slate-300" />}
+      </div>
+
+      <textarea
+        rows={2}
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+        onBlur={handleSave}
+        placeholder="Describe this item..."
+        className="mt-2 w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none transition-all duration-200 hover:border-slate-300 hover:bg-slate-50 focus:border-slate-400 focus:bg-white"
+      />
+
+      <div className="mt-2 flex items-center gap-2">
+        <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+          Qty
+        </label>
+        <input
+          type="number"
+          min="0"
+          value={quantity}
+          onChange={(e) => setQuantity(e.target.value)}
+          onBlur={handleSave}
+          className="w-20 rounded-xl border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-700 outline-none transition-all duration-200 hover:border-slate-300 hover:bg-slate-50 focus:border-slate-400 focus:bg-white"
+        />
+      </div>
+
+      {error && <p className="mt-1 text-[10px] font-bold text-red-500">{error}</p>}
+
+      <div className="mt-3 flex items-center justify-between gap-2">
+        <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+          Images ({group.images.length}) — select which to finalize
+        </p>
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={isUploading}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] font-black text-slate-600 transition-all duration-200 hover:bg-slate-50 hover:border-slate-300 disabled:opacity-60"
+        >
+          {isUploading ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <ImagePlus size={12} />
+          )}
+          Add Photos
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={handleFilesSelected}
+        />
+      </div>
+
+      {group.images.length === 0 ? (
+        <p className="mt-2 text-xs font-semibold text-slate-300">
+          No images uploaded for this item yet.
+        </p>
+      ) : (
+        <div className="mt-2 grid grid-cols-4 gap-1.5 sm:grid-cols-6">
+          {group.images.map((image, imageIndex) => {
+            const isSelected = selectedIds.has(image.id);
+            return (
+              <div
+                key={image.id}
+                onClick={() => onViewImage(group.images, imageIndex)}
+                className={`group relative aspect-square cursor-pointer overflow-hidden rounded-lg border-2 transition-all duration-200 hover:scale-105 ${
+                  isSelected
+                    ? "border-emerald-400 shadow-md shadow-emerald-100"
+                    : "border-slate-200 hover:border-slate-300"
+                }`}
+              >
+                <img
+                  src={resolveImageUrl(image.url)}
+                  alt={image.originalFileName || "Item image"}
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                />
+                {isSelected && <div className="absolute inset-0 bg-emerald-500/10" />}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleImage(group.groupKey, image.id);
+                  }}
+                  className={`absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full transition-all duration-200 ${
+                    isSelected
+                      ? "bg-emerald-500 text-white shadow-md"
+                      : "bg-black/50 text-white opacity-0 group-hover:opacity-100 backdrop-blur-sm"
+                  }`}
+                >
+                  <CheckCircle2 size={11} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FinalizeReview({
+  rowKey,
+  employeeId,
+  finalization,
+  onClose,
+  onFinalized,
+}) {
+  const [preview, setPreview] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [selections, setSelections] = useState(new Map());
+  const [viewer, setViewer] = useState(null);
+  const [budget, setBudget] = useState("");
+
+  const refreshPreview = useCallback(async () => {
+    const data = await loadFinalizePreview(rowKey);
+    setPreview(data);
+    return data;
+  }, [rowKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIsLoading(true);
+    refreshPreview()
+      .then((data) => {
+        if (cancelled) return;
+        setSelections(
+          new Map(
+            (data.items || []).map((group) => [
+              group.groupKey,
+              new Set(group.images.filter((image) => image.isSelected).map((image) => image.id)),
+            ])
+          )
+        );
+        setBudget(
+          data.finalization?.finalizedBudget !== null && data.finalization?.finalizedBudget !== undefined
+            ? String(data.finalization.finalizedBudget)
+            : ""
+        );
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message || "Failed to load finalize preview.");
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshPreview]);
+
+  function handleToggleImage(groupKey, imageId) {
+    setSelections((prev) => {
+      const next = new Map(prev);
+      const set = new Set(next.get(groupKey) || []);
+      if (set.has(imageId)) set.delete(imageId);
+      else set.add(imageId);
+      next.set(groupKey, set);
+      return next;
+    });
+  }
+
+  async function handleItemSaved() {
+    await refreshPreview();
+    await onFinalized();
+  }
+
+  async function handleImagesAdded(groupKey, newIds) {
+    await refreshPreview();
+    if (newIds.length) {
+      setSelections((prev) => {
+        const next = new Map(prev);
+        const set = new Set(next.get(groupKey) || []);
+        for (const id of newIds) set.add(id);
+        next.set(groupKey, set);
+        return next;
+      });
+    }
+    await onFinalized();
+  }
+
+  async function handleConfirm() {
+    setIsSaving(true);
+    setError("");
+    try {
+      const items = (preview?.items || []).map((group) => ({
+        itemKey: group.itemKey,
+        customLabel: group.customLabel,
+        description: group.description,
+        quantity: group.quantity,
+        imageIds: Array.from(selections.get(group.groupKey) || []),
+      }));
+      await finalizeClient(rowKey, employeeId, items, budget.trim() === "" ? null : budget);
+      await onFinalized();
+      onClose();
+    } catch (err) {
+      setError(err.message || "Failed to finalize client.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  const items = preview?.items || [];
+  const activeFinalization = preview?.finalization || finalization;
+  const totalSelected = Array.from(selections.values()).reduce(
+    (acc, set) => acc + set.size,
+    0
+  );
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 py-8"
+      style={{ animation: "fadeIn 0.2s ease" }}
+    >
+      <div
+        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        onClick={onClose}
+      />
+      <div
+        className="relative w-full max-w-5xl overflow-hidden rounded-3xl bg-white shadow-2xl shadow-black/30"
+        style={{ animation: "slideUp 0.3s ease" }}
+      >
+        <div className="flex items-center justify-between gap-4 border-b border-slate-100 bg-linear-to-r from-slate-50 to-white px-7 py-5">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-900">
+              <Sparkles size={18} className="text-white" />
+            </div>
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                Review
+              </p>
+              <p className="text-base font-black text-slate-900">
+                Finalize Client Selections
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            {totalSelected > 0 && (
+              <div className="flex items-center gap-1.5 rounded-xl bg-emerald-50 px-3.5 py-2">
+                <CheckCircle2 size={14} className="text-emerald-500" />
+                <span className="text-xs font-black text-emerald-700">
+                  {totalSelected} selected
+                </span>
+              </div>
+            )}
+            <button
+              onClick={onClose}
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 transition-all duration-200 hover:bg-slate-100 hover:text-slate-700"
+            >
+              <X size={18} />
+            </button>
+          </div>
+        </div>
+
+        <div className="max-h-[72vh] overflow-y-auto px-7 py-6">
+          {activeFinalization && (
+            <div className="mb-6 flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4">
+              <BadgeCheck size={18} className="shrink-0 text-emerald-500" />
+              <p className="text-xs font-semibold text-emerald-700">
+                Finalized by{" "}
+                <span className="font-black">
+                  {activeFinalization.finalizedByName || "an employee"}
+                </span>
+                {activeFinalization.finalizedAt
+                  ? ` on ${formatDisplayDatetime(activeFinalization.finalizedAt)}`
+                  : ""}
+                &nbsp;— you can still make changes and confirm again.
+              </p>
+            </div>
+          )}
+
+          <div className="mb-6">
+            <label className="mb-2 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500">
+              <Wallet size={14} className="text-slate-400" />
+              Finalize Budget for this event
+            </label>
+            <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 focus-within:border-slate-400">
+              <span className="text-sm font-black text-slate-400">৳</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={budget}
+                onChange={(event) => setBudget(event.target.value)}
+                placeholder="Enter finalized budget"
+                className="w-full border-none bg-transparent text-sm font-bold text-slate-900 outline-none placeholder:font-medium placeholder:text-slate-300"
+              />
+            </div>
+          </div>
+
+          <div className="mb-4 flex items-center gap-2">
+            <ClipboardList size={15} className="text-slate-400" />
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+              Items — combined across every meeting
+            </p>
+          </div>
+
+          {isLoading ? (
+            <div className="flex flex-col items-center justify-center py-16">
+              <Loader2 size={28} className="animate-spin text-slate-300" />
+            </div>
+          ) : items.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16 text-center">
+              <Calendar size={36} className="mb-4 text-slate-200" />
+              <p className="font-black text-slate-400">No items to finalize yet</p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {items.map((group) => (
+                <FinalizeItemGroupCard
+                  key={group.groupKey}
+                  rowKey={rowKey}
+                  group={group}
+                  employeeId={employeeId}
+                  selectedIds={selections.get(group.groupKey) || new Set()}
+                  onToggleImage={handleToggleImage}
+                  onViewImage={(images, index) => setViewer({ images, index })}
+                  onItemSaved={handleItemSaved}
+                  onImagesAdded={handleImagesAdded}
+                />
+              ))}
+            </div>
+          )}
+
+          {error && (
+            <div className="mt-4 flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+              <p className="text-xs font-bold text-red-600">{error}</p>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-3 border-t border-slate-100 bg-slate-50/50 px-7 py-4">
+          <button
+            onClick={onClose}
+            className="rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-black text-slate-700 transition-all duration-200 hover:bg-slate-50 hover:border-slate-300"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleConfirm}
+            disabled={isSaving || isLoading}
+            className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-6 py-2.5 text-sm font-black text-white transition-all duration-200 hover:bg-slate-700 disabled:opacity-60"
+          >
+            {isSaving ? (
+              <Loader2 size={15} className="animate-spin" />
+            ) : (
+              <BadgeCheck size={15} />
+            )}
+            Confirm & Finalize
+          </button>
+        </div>
+      </div>
+
+      {viewer && (
+        <ImageLightbox
+          images={viewer.images}
+          initialIndex={viewer.index}
+          onClose={() => setViewer(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Read-only view of exactly what was saved into client_finalizations —
+// distinct from FinalizeReview, which is the editable pick/confirm popup.
+function FinalizedItemsView({ rowKey, onClose }) {
+  const [detail, setDetail] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [viewer, setViewer] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadFinalizationDetail(rowKey)
+      .then((data) => {
+        if (!cancelled) setDetail(data);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message || "Failed to load finalized items.");
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [rowKey]);
+
+  const items = detail?.items || [];
+  const finalization = detail?.finalization;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 py-8"
+      style={{ animation: "fadeIn 0.2s ease" }}
+    >
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div
+        className="relative w-full max-w-5xl overflow-hidden rounded-3xl bg-white shadow-2xl shadow-black/30"
+        style={{ animation: "slideUp 0.3s ease" }}
+      >
+        <div className="flex items-center justify-between gap-4 border-b border-slate-100 bg-linear-to-r from-slate-50 to-white px-7 py-5">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-500">
+              <BadgeCheck size={18} className="text-white" />
+            </div>
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                Finalized
+              </p>
+              <p className="text-base font-black text-slate-900">
+                Confirmed Items
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 transition-all duration-200 hover:bg-slate-100 hover:text-slate-700"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="max-h-[72vh] overflow-y-auto px-7 py-6">
+          {finalization && (
+            <div className="mb-6 flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4">
+              <BadgeCheck size={18} className="shrink-0 text-emerald-500" />
+              <p className="text-xs font-semibold text-emerald-700">
+                Finalized by{" "}
+                <span className="font-black">
+                  {finalization.finalizedByName || "an employee"}
+                </span>
+                {finalization.finalizedAt
+                  ? ` on ${formatDisplayDatetime(finalization.finalizedAt)}`
+                  : ""}
+              </p>
+            </div>
+          )}
+
+          {finalization?.finalizedBudget !== null && finalization?.finalizedBudget !== undefined && (
+            <div className="mb-6 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-5 py-4">
+              <Wallet size={18} className="shrink-0 text-slate-400" />
+              <p className="text-xs font-semibold text-slate-600">
+                Finalize Budget for this event —{" "}
+                <span className="font-black text-slate-900">
+                  ৳{Number(finalization.finalizedBudget).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </p>
+            </div>
+          )}
+
+          {error && (
+            <div className="mb-4 flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+              <p className="text-xs font-bold text-red-600">{error}</p>
+            </div>
+          )}
+
+          {isLoading ? (
+            <div className="flex flex-col items-center justify-center py-16">
+              <Loader2 size={28} className="animate-spin text-slate-300" />
+            </div>
+          ) : items.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16 text-center">
+              <ClipboardList size={36} className="mb-4 text-slate-200" />
+              <p className="font-black text-slate-400">No finalized items yet</p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {items.map((item) => {
+                const option = CLIENT_REQUIREMENT_OPTIONS.find((c) => c.key === item.itemKey);
+                const displayLabel =
+                  item.itemKey === "other" ? item.customLabel || "Other" : option?.label || item.itemKey;
+
+                return (
+                  <div key={item.id} className="rounded-2xl border border-slate-200 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <p className="text-sm font-black text-slate-900">{displayLabel}</p>
+                      <span className="rounded-lg bg-slate-50 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                        Qty {item.quantity}
+                      </span>
+                    </div>
+
+                    {item.description && (
+                      <p className="mt-2 text-xs text-slate-600">{item.description}</p>
+                    )}
+
+                    {item.images.length === 0 ? (
+                      <p className="mt-3 text-xs font-semibold text-slate-300">
+                        No images finalized for this item.
+                      </p>
+                    ) : (
+                      <div className="mt-3 grid grid-cols-4 gap-1.5 sm:grid-cols-6">
+                        {item.images.map((image, imageIndex) => (
+                          <div
+                            key={image.id}
+                            className="aspect-square cursor-pointer overflow-hidden rounded-lg border border-slate-200 bg-slate-100 transition-all duration-200 hover:border-slate-300 hover:scale-105"
+                            onClick={() => setViewer({ images: item.images, index: imageIndex })}
+                          >
+                            <img
+                              src={resolveImageUrl(image.url)}
+                              alt={image.originalFileName || "Finalized image"}
+                              className="h-full w-full object-cover"
+                              loading="lazy"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {viewer && (
+        <ImageLightbox
+          images={viewer.images}
+          initialIndex={viewer.index}
+          onClose={() => setViewer(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+export default function ClientMeetingsPage() {
+  const { rowKey } = useParams();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const backTo = location.state?.from || "/office/management";
+  const [employee] = useState(() => loadCurrentEmployee());
+  const [clientName, setClientName] = useState("");
+  const [eventDate, setEventDate] = useState("");
+  const [meetings, setMeetings] = useState([]);
+  const [finalization, setFinalization] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isCreating, setIsCreating] = useState(false);
+  const [showFinalize, setShowFinalize] = useState(false);
+  const [showFinalizedView, setShowFinalizedView] = useState(false);
+  const [error, setError] = useState("");
+  const [employeeDirectory, setEmployeeDirectory] = useState([]);
+  // Tracks meeting ids created during this visit that haven't yet been
+  // given a discussion note or an item — if the employee navigates away
+  // without saving one, these get quietly deleted so an empty card never
+  // counts as a real meeting.
+  const pendingEmptyMeetingIdsRef = useRef(new Set());
+  const meetingsRef = useRef([]);
+
+  const refresh = useCallback(async () => {
+    setError("");
+    try {
+      const data = await loadClientMeetings(rowKey);
+      setClientName(data.clientName || "");
+      setEventDate(data.eventDate || "");
+      setMeetings(data.meetings || []);
+      setFinalization(data.finalization || null);
+    } catch (err) {
+      setError(err.message || "Failed to load meetings.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [rowKey]);
+
+  useEffect(() => {
+    meetingsRef.current = meetings;
+  }, [meetings]);
+
+  useEffect(() => {
+    if (!employee) {
+      navigate("/office/login", { replace: true });
+      return;
+    }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial data fetch on mount
+    refresh();
+    loadEmployeeDirectory()
+      .then((list) => setEmployeeDirectory(list || []))
+      .catch(() => setEmployeeDirectory([]));
+  }, [employee, navigate, refresh]);
+
+  // Cleans up any still-empty meeting created during this visit when
+  // leaving this client (navigating away or unmounting) — satisfies "goes
+  // back or to another page ... will not be stored as any meeting".
+  useEffect(() => {
+    pendingEmptyMeetingIdsRef.current = new Set();
+    return () => {
+      const ids = Array.from(pendingEmptyMeetingIdsRef.current);
+      for (const id of ids) {
+        const current = meetingsRef.current.find((m) => m.id === id);
+        if (current && current.items.length === 0) {
+          deleteMeeting(rowKey, id).catch(() => {});
+        }
+      }
+    };
+  }, [rowKey]);
+
+  const hasEmptyMeeting = meetings.some(
+    (m) => m.items.length === 0
+  );
+
+  async function handleCreateMeeting() {
+    setIsCreating(true);
+    setError("");
+    try {
+      // The server stamps the meeting time itself (current moment) — no
+      // datetime is sent from here.
+      const created = await createMeeting(rowKey, {
+        employeeId: employee?.id,
+      });
+      pendingEmptyMeetingIdsRef.current.add(created.id);
+      await refresh();
+    } catch (err) {
+      setError(err.message || "Failed to create meeting.");
+    } finally {
+      setIsCreating(false);
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-[#f8f9fb] text-black">
+      <style>{`
+        @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(16px) } to { opacity: 1; transform: translateY(0) } }
+        @keyframes scaleIn { from { opacity: 0; transform: scale(0.97) } to { opacity: 1; transform: scale(1) } }
+      `}</style>
+
+      <header className="sticky top-0 z-40 border-b border-slate-200/80 bg-white/90 shadow-sm shadow-slate-200/40 backdrop-blur-xl">
+        <div className="flex min-h-17 items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
+          <div className="flex min-w-0 items-center gap-3">
+            <img src={eliteLogo} alt="Elite Convention Hall" className="h-16 w-auto shrink-0 object-contain sm:h-18" />
+            <div className="min-w-0 border-l border-slate-200 pl-3">
+              <p className="truncate text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">
+                Client Meeting Manager
+              </p>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main className="px-4 py-8 sm:px-6 lg:px-8">
+        <div className="mx-auto max-w-none">
+          <div className="mb-4">
+            <BackButton to={backTo} title="Back to sheet" />
+          </div>
+
+          <div
+            className="mb-8 overflow-hidden rounded-3xl bg-white p-7 shadow-sm shadow-slate-200/60 border border-slate-200/80"
+            style={{ animation: "scaleIn 0.3s ease" }}
+          >
+            <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0 flex-1">
+                <div className="mb-2 flex items-center gap-2">
+                  <CalendarClock size={14} className="text-slate-400" />
+                  <p className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-400">
+                    Client Meetings
+                  </p>
+                </div>
+                <h1 className="text-3xl font-black text-slate-900 sm:text-4xl">
+                  {clientName || "This client"}
+                </h1>
+                {eventDate && (
+                  <p className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-bold text-slate-600">
+                    <CalendarClock size={13} className="text-slate-400" />
+                    Event Date: {formatEventDateDisplay(eventDate)}
+                  </p>
+                )}
+                <p className="mt-2.5 max-w-2xl text-sm leading-relaxed text-slate-500">
+                  Schedule meetings, track client requirements, and upload the
+                  images the client chose during each session.
+                </p>
+
+                {finalization && (
+                  <button
+                    onClick={() => setShowFinalize(true)}
+                    className="mt-4 inline-flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 transition-all duration-200 hover:bg-emerald-100 hover:border-emerald-300"
+                    style={{ animation: "slideUp 0.2s ease" }}
+                    title="Click to see what was finalized"
+                  >
+                    <BadgeCheck size={15} className="shrink-0 text-emerald-500" />
+                    <p className="text-xs font-bold text-emerald-700">
+                      Finalized by{" "}
+                      <span className="font-black">
+                        {finalization.finalizedByName || "an employee"}
+                      </span>
+                      {finalization.finalizedAt
+                        ? ` · ${formatDisplayDatetime(finalization.finalizedAt)}`
+                        : ""}
+                    </p>
+                  </button>
+                )}
+              </div>
+
+              <div className="flex shrink-0 gap-3">
+                <div className="flex flex-col items-center justify-center rounded-2xl bg-slate-50 px-5 py-4 text-center border border-slate-100">
+                  <span className="text-3xl font-black text-slate-900">
+                    {meetings.length}
+                  </span>
+                  <span className="mt-0.5 text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                    Meetings
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-slate-100 pt-6">
+              <button
+                onClick={() => setShowFinalize(true)}
+                disabled={meetings.length === 0}
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-black text-slate-700 shadow-sm transition-all duration-200 hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Sparkles size={16} className="text-amber-500" />
+                {finalization ? "Review & Re-confirm" : "Complete & Finalize"}
+              </button>
+              {finalization && (
+                <button
+                  onClick={() => setShowFinalizedView(true)}
+                  className="inline-flex items-center gap-2 rounded-xl border border-emerald-200 bg-white px-5 py-2.5 text-sm font-black text-emerald-700 shadow-sm transition-all duration-200 hover:bg-emerald-50 hover:border-emerald-300 hover:shadow-md"
+                >
+                  <BadgeCheck size={16} className="text-emerald-500" />
+                  View Finalized Items
+                </button>
+              )}
+              <button
+                onClick={handleCreateMeeting}
+                disabled={isCreating || hasEmptyMeeting}
+                title={hasEmptyMeeting ? "Finish and save the existing new meeting first" : undefined}
+                className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-black text-white shadow-md shadow-slate-900/20 transition-all duration-200 hover:bg-slate-700 hover:shadow-lg hover:shadow-slate-900/25 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isCreating ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  <Plus size={16} />
+                )}
+                Add New Meeting
+              </button>
+              {hasEmptyMeeting && (
+                <p className="text-xs font-semibold text-slate-400">
+                  Add at least one item to the new meeting before starting another.
+                </p>
+              )}
+            </div>
+          </div>
+
+          {error && (
+            <div
+              className="mb-5 flex items-center gap-3 rounded-2xl border border-red-200 bg-red-50 px-5 py-4"
+              style={{ animation: "slideUp 0.2s ease" }}
+            >
+              <p className="text-sm font-bold text-red-600">{error}</p>
+            </div>
+          )}
+
+          {isLoading ? (
+            <div className="flex min-h-72 flex-col items-center justify-center gap-3 rounded-3xl bg-white border border-slate-200">
+              <Loader2
+                size={28}
+                className="animate-spin text-slate-300"
+              />
+              <p className="text-sm font-semibold text-slate-300">
+                Loading meetings...
+              </p>
+            </div>
+          ) : meetings.length === 0 ? (
+            <div
+              className="flex min-h-72 flex-col items-center justify-center gap-4 rounded-3xl border-2 border-dashed border-slate-200 bg-white p-8 text-center"
+              style={{ animation: "scaleIn 0.3s ease" }}
+            >
+              <div className="flex h-16 w-16 items-center justify-center rounded-3xl bg-slate-50">
+                <CalendarClock size={28} className="text-slate-300" />
+              </div>
+              <div>
+                <p className="text-lg font-black text-slate-400">
+                  No meetings yet
+                </p>
+                <p className="mt-1.5 max-w-sm text-sm text-slate-300">
+                  Click "Add New Meeting" to schedule the first meeting with
+                  this client.
+                </p>
+              </div>
+              <button
+                onClick={handleCreateMeeting}
+                disabled={isCreating || hasEmptyMeeting}
+                className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-black text-white transition-all duration-200 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isCreating ? (
+                  <Loader2 size={15} className="animate-spin" />
+                ) : (
+                  <Plus size={15} />
+                )}
+                Add New Meeting
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {meetings.map((meeting, index) => (
+                <div
+                  key={meeting.id}
+                  style={{ animation: `slideUp 0.3s ease ${index * 0.06}s both` }}
+                >
+                  <MeetingCard
+                    meeting={meeting}
+                    rowKey={rowKey}
+                    employeeId={employee?.id}
+                    employeeDirectory={employeeDirectory}
+                    onChanged={refresh}
+                    onDeleted={refresh}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </main>
+
+      {showFinalize && (
+        <FinalizeReview
+          rowKey={rowKey}
+          employeeId={employee?.id}
+          finalization={finalization}
+          onClose={() => setShowFinalize(false)}
+          onFinalized={refresh}
+        />
+      )}
+
+      {showFinalizedView && (
+        <FinalizedItemsView
+          rowKey={rowKey}
+          onClose={() => setShowFinalizedView(false)}
+        />
+      )}
+    </div>
+  );
+}

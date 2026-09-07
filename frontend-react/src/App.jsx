@@ -22,6 +22,9 @@ import AdminReportsPage from "./pages/admin/AdminReportsPage";
 
 import PaymentResultPage from "./pages/customer/PaymentResultPage";
 
+import OfficeLayout from "./modules/OfficeLayout";
+import OfficeRoutes from "./modules/OfficeRoutes";
+
 export default function App() {
   return (
     <BrowserRouter>
@@ -48,6 +51,9 @@ export default function App() {
         <Route path="/admin-customers" element={<AdminCustomersPage />} />
         <Route path="/admin-customers/:customerId" element={<AdminCustomerDetailsPage />} />
         <Route path="/admin-reports" element={<AdminReportsPage />} />
+
+        {/* Office Management / Accounts / Attendance modules */}
+        <Route element={<OfficeLayout />}>{OfficeRoutes()}</Route>
 
         {/* Fallback: prevent white blank screen */}
         <Route path="*" element={<Navigate to="/" replace />} />

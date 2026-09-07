@@ -1,0 +1,117 @@
+/* Tailwind entry point for the Office Management, Accounts and Attendance
+   modules.
+
+   Preflight is deliberately NOT imported: it resets base element styling
+   globally, which would break the booking site's existing CSS. Instead the
+   parts of it the ported MME UI actually relies on are replicated below,
+   scoped to the .office-app wrapper that those routes render inside. */
+
+@layer theme, base, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+/* Utilities used by the module files must be discoverable by Tailwind's
+   scanner even though they live outside the default content roots. */
+@source "./modules";
+
+@import "./modules/office/office.css";
+
+@layer base {
+  .office-app,
+  .office-app *,
+  .office-app *::before,
+  .office-app *::after {
+    box-sizing: border-box;
+    border: 0 solid;
+  }
+
+  .office-app h1,
+  .office-app h2,
+  .office-app h3,
+  .office-app h4,
+  .office-app h5,
+  .office-app h6 {
+    font-size: inherit;
+    font-weight: inherit;
+    margin: 0;
+  }
+
+  .office-app p,
+  .office-app figure,
+  .office-app blockquote,
+  .office-app dl,
+  .office-app dd,
+  .office-app pre {
+    margin: 0;
+  }
+
+  .office-app ol,
+  .office-app ul,
+  .office-app menu {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .office-app a {
+    color: inherit;
+    text-decoration: inherit;
+  }
+
+  .office-app button,
+  .office-app input,
+  .office-app optgroup,
+  .office-app select,
+  .office-app textarea {
+    font: inherit;
+    color: inherit;
+    letter-spacing: inherit;
+    margin: 0;
+    padding: 0;
+    background-color: transparent;
+    border-radius: 0;
+  }
+
+  .office-app button,
+  .office-app [type="button"],
+  .office-app [type="reset"],
+  .office-app [type="submit"] {
+    appearance: button;
+  }
+
+  .office-app img,
+  .office-app svg,
+  .office-app video,
+  .office-app canvas,
+  .office-app audio,
+  .office-app iframe,
+  .office-app embed,
+  .office-app object {
+    display: block;
+    vertical-align: middle;
+  }
+
+  .office-app img,
+  .office-app video {
+    max-width: 100%;
+    height: auto;
+  }
+
+  .office-app table {
+    border-collapse: collapse;
+    border-color: inherit;
+    text-indent: 0;
+  }
+
+  .office-app hr {
+    height: 0;
+    color: inherit;
+    border-top-width: 1px;
+  }
+
+  .office-app ::placeholder {
+    opacity: 1;
+    color: color-mix(in oklab, currentcolor 50%, transparent);
+  }
+}

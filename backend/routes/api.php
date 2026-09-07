@@ -229,6 +229,16 @@ Route::prefix('admin/homepage-content')->middleware('throttle:30,1')->group(func
 
 /*
 |--------------------------------------------------------------------------
+| Module Routes (Office Management, Accounts, Attendance)
+|--------------------------------------------------------------------------
+*/
+
+foreach (glob(__DIR__.'/modules/*.php') as $moduleRoutes) {
+    require $moduleRoutes;
+}
+
+/*
+|--------------------------------------------------------------------------
 | API Fallback
 |--------------------------------------------------------------------------
 */
