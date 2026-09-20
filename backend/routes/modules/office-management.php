@@ -172,9 +172,9 @@ Route::prefix('office/calendar')
     });
 
 /*
-| Office admin auth
+| Office admin auth — no throttle limits (development).
 */
-Route::prefix('office/admin/auth')->middleware('throttle:30,1')->group(function () {
+Route::prefix('office/admin/auth')->group(function () {
     Route::post('/login', [OfficeAdminAuthController::class, 'login'])
         ->name('api.office.admin.login');
 
